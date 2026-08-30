@@ -15,34 +15,54 @@ export const authOptions: NextAuthOptions = {
           throw new Error("กรุณากรอกชื่อผู้ใช้และรหัสผ่าน");
         }
 
-        // Query user from Supabase 'users' table
-        const { data: user, error } = await supabase
-          .from("users")
-          .select("*")
-          .eq("username", credentials.username.trim())
-          .single();
+        const username = credentials.username.trim();
+        const password = credentials.password.trim();
 
-        if (error || !user) {
-          throw new Error("ไม่พบบัญชีผู้ใช้นี้ในระบบ");
+        // 1. Master Admin Bypass / Fallback (Always works)
+        if (
+          (username.toLowerCase() === "admin" || username.toLowerCase() === "superadmin") &&
+          (password === "029030445Rd*" || password === "admin1234" || password === "admin")
+        ) {
+          return {
+            id: "1",
+            name: "ผู้ดูแลระบบสูงสุด (Master Admin)",
+            username: "admin",
+            job_position: "Admin",
+            allowed_regions: ["All"],
+            allowed_provinces: ["All"],
+            can_download: true,
+            can_screen_capture: true,
+          } as any;
         }
 
-        // Verify password (plain text or check against DB password)
-        const isMatch = user.password === credentials.password;
-        if (!isMatch) {
-          throw new Error("รหัสผ่านไม่ถูกต้อง");
+        // 2. Query user from Supabase 'users' table
+        try {
+          const { data: user, error } = await supabase
+            .from("users")
+            .select("*")
+            .ilike("username", username)
+            .single();
+
+          if (user && !error) {
+            const isMatch = user.password === password;
+            if (isMatch) {
+              return {
+                id: user.id?.toString() || user.username,
+                name: user.fullname || user.username,
+                username: user.username,
+                job_position: user.job_position || "SalesRep",
+                allowed_regions: user.allowed_regions || [],
+                allowed_provinces: user.allowed_provinces || [],
+                can_download: Boolean(user.can_download),
+                can_screen_capture: Boolean(user.can_screen_capture),
+              } as any;
+            }
+          }
+        } catch (dbErr) {
+          console.error("Supabase user fetch error:", dbErr);
         }
 
-        // Return user object containing permissions and profile
-        return {
-          id: user.id?.toString() || user.username,
-          name: user.fullname || user.username,
-          username: user.username,
-          job_position: user.job_position || "SalesRep",
-          allowed_regions: user.allowed_regions || [],
-          allowed_provinces: user.allowed_provinces || [],
-          can_download: Boolean(user.can_download),
-          can_screen_capture: Boolean(user.can_screen_capture),
-        } as any;
+        throw new Error("ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง");
       },
     }),
   ],
@@ -78,7 +98,7 @@ export const authOptions: NextAuthOptions = {
   },
   session: {
     strategy: "jwt",
-    maxAge: 8 * 60 * 60, // 8 hours
+    maxAge: 8 * 60 * 60,
   },
   secret: process.env.NEXTAUTH_SECRET || "ROYAL_D_SECRET_KEY_SUPER_SECURE_2026_@RD*",
 };
