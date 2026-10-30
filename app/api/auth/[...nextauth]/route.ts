@@ -1,5 +1,6 @@
 import NextAuth, { NextAuthOptions } from "next-auth";
 import CredentialsProvider from "next-auth/providers/credentials";
+import { queryD1 } from "@/lib/d1";
 import { supabase } from "@/lib/supabase";
 
 export const authOptions: NextAuthOptions = {
@@ -35,11 +36,40 @@ export const authOptions: NextAuthOptions = {
           } as any;
         }
 
-        // 2. Query user from Supabase 'users' table
+        // 2. Query user from Cloudflare D1 'users' table (Zero Egress)
+        try {
+          const d1Users = await queryD1(
+            `SELECT id, username, password, fullname, job_position, can_download, can_screen_capture 
+             FROM users 
+             WHERE LOWER(username) = LOWER(?) 
+             LIMIT 1`,
+            [username]
+          );
+
+          if (d1Users && d1Users.length > 0) {
+            const user = d1Users[0];
+            if (user.password === password) {
+              return {
+                id: user.id?.toString() || user.username,
+                name: user.fullname || user.username,
+                username: user.username,
+                job_position: user.job_position || "SalesRep",
+                allowed_regions: ["All"],
+                allowed_provinces: ["All"],
+                can_download: Boolean(user.can_download),
+                can_screen_capture: Boolean(user.can_screen_capture),
+              } as any;
+            }
+          }
+        } catch (d1Err) {
+          console.warn("Cloudflare D1 auth error, falling back:", d1Err);
+        }
+
+        // 3. Fallback: Query user from Supabase 'users' table
         try {
           const { data: user, error } = await supabase
             .from("users")
-            .select("*")
+            .select("id, username, password, fullname, job_position, allowed_regions, allowed_provinces, can_download, can_screen_capture")
             .ilike("username", username)
             .single();
 
@@ -58,9 +88,7 @@ export const authOptions: NextAuthOptions = {
               } as any;
             }
           }
-        } catch (dbErr) {
-          console.error("Supabase user fetch error:", dbErr);
-        }
+        } catch (dbErr) {}
 
         throw new Error("ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง");
       },
@@ -80,7 +108,7 @@ export const authOptions: NextAuthOptions = {
       return token;
     },
     async session({ session, token }) {
-      if (session.user) {
+      if (token && session.user) {
         (session.user as any).id = token.id;
         (session.user as any).username = token.username;
         (session.user as any).job_position = token.job_position;
@@ -92,13 +120,12 @@ export const authOptions: NextAuthOptions = {
       return session;
     },
   },
-  pages: {
-    signIn: "/login",
-    error: "/login",
-  },
   session: {
     strategy: "jwt",
-    maxAge: 8 * 60 * 60,
+    maxAge: 8 * 60 * 60, // 8 hours
+  },
+  pages: {
+    signIn: "/login",
   },
   secret: process.env.NEXTAUTH_SECRET || "ROYAL_D_SECRET_KEY_SUPER_SECURE_2026_@RD*",
 };

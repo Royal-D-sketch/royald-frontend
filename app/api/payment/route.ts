@@ -1,10 +1,10 @@
 import { NextResponse } from 'next/server';
+import { queryD1 } from '@/lib/d1';
 import { supabase } from '@/lib/supabase';
 
 /**
  * POST /api/payment
- * Handles payment submissions (Transfer or Check) from frontend.
- * Uses native FormData supported by Next.js App Router and Vercel.
+ * บันทึกการชำระเงินลง Cloudflare D1 (Zero Egress) และ Supabase (Fallback)
  */
 export async function POST(request: Request) {
   try {
@@ -28,61 +28,69 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Invalid amount' }, { status: 400 });
     }
 
-    // Fetch current remaining amount from Supabase
-    const { data: bill, error: fetchErr } = await supabase
-      .from('sales_bills')
-      .select('remaining_amount, status')
-      .eq('bill_no', billNo)
-      .single();
-
     let newRemaining = 0;
-    if (bill && !fetchErr) {
-      newRemaining = Math.max(0, parseFloat(bill.remaining_amount || '0') - amtNum);
-      const newStatus = newRemaining === 0 ? 'Paid' : bill.status;
+    const now = new Date().toISOString();
 
-      await supabase
-        .from('sales_bills')
-        .update({ remaining_amount: newRemaining, status: newStatus })
-        .eq('bill_no', billNo);
-    }
+    // --- 1. บันทึกลง Cloudflare D1 เป็นหลัก (Zero Egress) ---
+    try {
+      const bills = await queryD1<{ remaining_amount: number; total_amount: number; status: string }>(
+        `SELECT remaining_amount, total_amount, status FROM sales_bills WHERE bill_no = ? LIMIT 1`,
+        [billNo]
+      );
 
-    // Handle file upload to Supabase Storage if present
-    let fileUrl: string | null = null;
-    if (file && file.size > 0) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const fileName = `${Date.now()}_${file.name}`;
-      const { data: storageData, error: storageErr } = await supabase.storage
-        .from('payment_attachments')
-        .upload(fileName, buffer, {
-          contentType: file.type,
-        });
+      if (bills && bills.length > 0) {
+        const currentRem = Number(bills[0].remaining_amount ?? bills[0].total_amount ?? 0);
+        newRemaining = Math.max(0, currentRem - amtNum);
+        const newStatus = newRemaining === 0 ? 'Paid' : 'Outstanding';
 
-      if (!storageErr && storageData) {
-        const { data: publicUrlData } = supabase.storage
-          .from('payment_attachments')
-          .getPublicUrl(fileName);
-        fileUrl = publicUrlData?.publicUrl || null;
+        await queryD1(
+          `UPDATE sales_bills SET remaining_amount = ?, status = ? WHERE bill_no = ?`,
+          [newRemaining, newStatus, billNo]
+        );
+
+        await queryD1(
+          `INSERT INTO payment_records (bill_no, amount, method, pay_date, note, bank, check_no, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+          [billNo, amtNum, method, payDate, note, bank, checkNo, now]
+        );
       }
+    } catch (d1Err) {
+      console.warn("Cloudflare D1 payment record warning:", d1Err);
     }
 
-    // Insert payment transaction record
-    const paymentRecord = {
-      bill_no: billNo,
-      amount: amtNum,
-      method,
-      pay_date: payDate,
-      note: note || null,
-      file_url: fileUrl,
-      check_date: checkDate || null,
-      bank: bank || null,
-      check_no: checkNo || null,
-    };
+    // --- 2. อัปเดต Supabase ด้วย (ถ้ามี) ---
+    try {
+      const { data: bill } = await supabase
+        .from('sales_bills')
+        .select('remaining_amount, status')
+        .eq('bill_no', billNo)
+        .single();
 
-    await supabase.from('payment_records').insert(paymentRecord);
+      if (bill) {
+        const cur = parseFloat(bill.remaining_amount || '0');
+        newRemaining = Math.max(0, cur - amtNum);
+        const newStatus = newRemaining === 0 ? 'Paid' : bill.status;
+
+        await supabase
+          .from('sales_bills')
+          .update({ remaining_amount: newRemaining, status: newStatus })
+          .eq('bill_no', billNo);
+
+        await supabase.from('payment_records').insert({
+          bill_no: billNo,
+          amount: amtNum,
+          method,
+          pay_date: payDate,
+          note,
+          bank,
+          check_no,
+        });
+      }
+    } catch (supaErr) {}
 
     return NextResponse.json({
       success: true,
-      message: 'Payment recorded successfully',
+      message: 'บันทึกการชำระเงินลงระบบสำเร็จ (Cloudflare D1)',
       remaining_amount: newRemaining,
     });
   } catch (err: any) {

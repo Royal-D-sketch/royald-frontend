@@ -1,6 +1,19 @@
 import { NextResponse } from 'next/server';
 import { supabase } from '@/lib/supabase';
-import dayjs from 'dayjs';
+import { parse, format, isValid } from 'date-fns';
+
+/** Helper to parse dates from various formats and return ISO string (yyyy-MM-dd) or null */
+function parseDate(raw: string): string | null {
+  const patterns = ['yyyy-MM-dd', 'dd/MM/yyyy', 'MM/dd/yyyy', 'dd-MM-yyyy'];
+  for (const p of patterns) {
+    const parsed = parse(raw, p, new Date());
+    if (isValid(parsed)) {
+      return format(parsed, 'yyyy-MM-dd');
+    }
+  }
+  return null;
+}
+
 
 /**
  * POST /api/upload-cd
@@ -31,9 +44,11 @@ export async function POST(request: Request) {
         if (billNo && billNo.length >= 3 && !billNo.toLowerCase().includes('เลขที่') && !billNo.toLowerCase().includes('bill')) {
           let billDate = new Date().toISOString().split('T')[0];
           if (cols[1]) {
-            const parsedD = dayjs(cols[1], ['YYYY-MM-DD', 'DD/MM/YYYY', 'MM/DD/YYYY', 'DD-MM-YYYY']);
-            if (parsedD.isValid()) {
-              billDate = parsedD.format('YYYY-MM-DD');
+            const parsed = parseDate(cols[1]);
+            if (parsed) {
+              billDate = parsed;
+            } else {
+              billDate = null; // will be handled as missing date
             }
           }
 

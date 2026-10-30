@@ -38,8 +38,12 @@ export default withAuth(
 export const config = {
   matcher: [
     "/sales-dashboard/:path*",
+    "/products/:path*",
+    "/charts/:path*",
     "/api/upload-cd/:path*",
     "/api/payment/:path*",
     "/api/bills/:path*",
+    "/api/products/:path*",
+    "/api/charts/:path*",
   ],
 };
